@@ -40,6 +40,13 @@
                 <span id="totalPagesLabel" class="px-2 py-2 text-gray-500">/ 1</span>
                 <button id="nextPageBtn" class="px-4 py-2 bg-blue-400 text-white rounded hover:bg-blue-500 transition">Next</button>
                 <span class="flex-1"></span>
+                <select id="pdfSizeSelect" class="px-2 py-2 border rounded text-sm">
+                    <option value="auto">Auto Size</option>
+                    <option value="a4">A4 (210×297mm)</option>
+                    <option value="letter">Letter (216×279mm)</option>
+                    <option value="legal">Legal (216×356mm)</option>
+                    <option value="a3">A3 (297×420mm)</option>
+                </select>
                 <button id="exportPdfBtn" class="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 transition">Export PDF</button>
             </div>
             <div class="flex justify-center items-center space-x-2 w-full">
@@ -145,11 +152,15 @@
         var currentPage = 1;
         var pdfMode = false;
         var canvasPages = document.getElementById('canvasPages');
+        
+        // Get DOM elements for tooltips
+        var textToolbar = document.getElementById('textToolbar');
+        var shapeTooltip = document.getElementById('shapeTooltip');
 
         function createCanvasContainer(pageNum, width = 800, height = 1000) {
             var container = document.createElement('div');
             container.className = 'canvas-container';
-            container.id = pageNum;
+            container.id = pageNum.toString();
             container.style.display = 'none';
             var c = document.createElement('canvas');
             c.width = width;
@@ -158,10 +169,18 @@
             container.appendChild(c);
             canvasPages.appendChild(container);
             var fabricCanvas = new fabric.Canvas(c);
+            
+            // Set up canvas events for the new canvas
+            setupCanvasEvents(fabricCanvas);
+            
             return { container, fabricCanvas };
         }
 
         function showPage(pageNum) {
+            // Hide tooltips when switching pages
+            hideTextToolbar();
+            hideShapeTooltip();
+            
             pages.forEach(function(p, idx) {
                 p.container.style.display = (idx + 1 === pageNum) ? '' : 'none';
             });
@@ -173,6 +192,8 @@
         function initBlank() {
             pages = [];
             canvasPages.innerHTML = '';
+            // Clear original page sizes when starting blank
+            window.originalPageSizes = [];
             var page = createCanvasContainer(1);
             pages.push(page);
             showPage(1);
@@ -188,9 +209,21 @@
         document.getElementById('addPageBtn').onclick = function() {
             var width = pages[0].fabricCanvas.getWidth();
             var height = pages[0].fabricCanvas.getHeight();
-            var page = createCanvasContainer(pages.length + 1, width, height);
-            pages.push(page);
-            showPage(pages.length);
+            
+            // Insert new page after current page
+            var newPageNum = currentPage + 1;
+            var page = createCanvasContainer(newPageNum, width, height);
+            
+            // Insert the new page at the correct position
+            pages.splice(currentPage, 0, page);
+            
+            // Update IDs for all pages after the inserted page
+            for (var i = currentPage; i < pages.length; i++) {
+                pages[i].container.id = (i + 1).toString();
+            }
+            
+            // Show the newly inserted page
+            showPage(newPageNum);
             updatePageLabels();
         };
         document.getElementById('prevPageBtn').onclick = function() {
@@ -329,15 +362,161 @@
         };
         document.getElementById('exportPdfBtn').onclick = function() {
             var { jsPDF } = window.jspdf;
-            var pdf = new jsPDF('p', 'mm', 'a4');
-            var imgWidth = 210;
-            var pageHeight = 295;
-            var imgHeight = (pages[0].fabricCanvas.height * imgWidth) / pages[0].fabricCanvas.width;
+            var sizeOption = document.getElementById('pdfSizeSelect').value;
+            
+            // Define standard page sizes in mm
+            var pageSizes = {
+                'a4': [210, 297],
+                'letter': [216, 279],
+                'legal': [216, 356],
+                'a3': [297, 420]
+            };
+            
+            var pdfWidth, pdfHeight;
+            
+            if (sizeOption === 'auto') {
+                // Check if we have original PDF page sizes
+                if (window.originalPageSizes && window.originalPageSizes.length > 0) {
+                    // Use original PDF dimensions
+                    var firstPageSize = window.originalPageSizes[0];
+                    var orientation = firstPageSize.isLandscape ? 'l' : 'p'; // 'l' for landscape, 'p' for portrait
+                    var pdf = new jsPDF(orientation, 'mm', [firstPageSize.width, firstPageSize.height]);
+                    
             pages.forEach(function(page, idx) {
+                        if (idx > 0) {
+                            // Use original size for each page if available
+                            var pageSize = window.originalPageSizes[idx] || window.originalPageSizes[0];
+                            pdf.addPage([pageSize.width, pageSize.height]);
+                        }
+                        
                 var dataURL = page.fabricCanvas.toDataURL({ format: 'png', quality: 1 });
-                if (idx > 0) pdf.addPage();
+                        
+                        // Use original page dimensions
+                        var pageSize = window.originalPageSizes[idx] || window.originalPageSizes[0];
+                        var imgWidth = pageSize.width;
+                        var imgHeight = pageSize.height;
+                        
                 pdf.addImage(dataURL, 'PNG', 0, 0, imgWidth, imgHeight);
             });
+                } else {
+                    // Fallback to content-based sizing for blank canvases
+                    var pdfPages = [];
+                    pages.forEach(function(page, idx) {
+                        var canvas = page.fabricCanvas;
+                        
+                        // Get the actual content bounds
+                        var objects = canvas.getObjects();
+                        var minX = 0, minY = 0, maxX = canvas.width, maxY = canvas.height;
+                        
+                        if (objects.length > 0) {
+                            // Calculate bounds of all objects
+                            var bounds = canvas.getObjects().reduce(function(acc, obj) {
+                                var objBounds = obj.getBoundingRect();
+                                return {
+                                    minX: Math.min(acc.minX, objBounds.left),
+                                    minY: Math.min(acc.minY, objBounds.top),
+                                    maxX: Math.max(acc.maxX, objBounds.left + objBounds.width),
+                                    maxY: Math.max(acc.maxY, objBounds.top + objBounds.height)
+                                };
+                            }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+                            
+                            // Add some padding
+                            var padding = 20;
+                            minX = Math.max(0, bounds.minX - padding);
+                            minY = Math.max(0, bounds.minY - padding);
+                            maxX = Math.min(canvas.width, bounds.maxX + padding);
+                            maxY = Math.min(canvas.height, bounds.maxY + padding);
+                        }
+                        
+                        var contentWidth = maxX - minX;
+                        var contentHeight = maxY - minY;
+                        
+                        // Ensure minimum dimensions
+                        contentWidth = Math.max(contentWidth, 200);
+                        contentHeight = Math.max(contentHeight, 200);
+                        
+                        pdfPages.push({
+                            dataURL: canvas.toDataURL({ format: 'png', quality: 1 }),
+                            width: contentWidth,
+                            height: contentHeight,
+                            minX: minX,
+                            minY: minY
+                        });
+                    });
+                    
+                    // Find the maximum dimensions to use consistent page size
+                    var maxWidth = Math.max(...pdfPages.map(p => p.width));
+                    var maxHeight = Math.max(...pdfPages.map(p => p.height));
+                    
+                    // Convert to mm (assuming 96 DPI)
+                    var mmPerPixel = 25.4 / 96;
+                    pdfWidth = maxWidth * mmPerPixel;
+                    pdfHeight = maxHeight * mmPerPixel;
+                    
+                    // Ensure reasonable limits
+                    pdfWidth = Math.min(Math.max(pdfWidth, 50), 420); // Max A3 width
+                    pdfHeight = Math.min(Math.max(pdfHeight, 50), 594); // Max A3 height
+                    
+                    // Create PDF with calculated dimensions
+                    var pdf = new jsPDF('p', 'mm', [pdfWidth, pdfHeight]);
+                    
+                    pdfPages.forEach(function(page, idx) {
+                        if (idx > 0) pdf.addPage();
+                        
+                        // Scale the image to fit the PDF page
+                        var scaleX = pdfWidth / page.width;
+                        var scaleY = pdfHeight / page.height;
+                        var scale = Math.min(scaleX, scaleY, 1); // Don't scale up
+                        
+                        var imgWidth = page.width * scale * mmPerPixel;
+                        var imgHeight = page.height * scale * mmPerPixel;
+                        
+                        // Center the image on the page
+                        var x = (pdfWidth - imgWidth) / 2;
+                        var y = (pdfHeight - imgHeight) / 2;
+                        
+                        pdf.addImage(page.dataURL, 'PNG', x, y, imgWidth, imgHeight);
+                    });
+                }
+            } else {
+                // Use standard page size
+                var size = pageSizes[sizeOption];
+                pdfWidth = size[0];
+                pdfHeight = size[1];
+                
+                // Check if we should use landscape orientation for standard sizes
+                var orientation = 'p'; // Default to portrait
+                if (window.originalPageSizes && window.originalPageSizes.length > 0) {
+                    // If we have original PDF data, use the first page's orientation
+                    var firstPageSize = window.originalPageSizes[0];
+                    orientation = firstPageSize.isLandscape ? 'l' : 'p';
+                }
+                
+                var pdf = new jsPDF(orientation, 'mm', [pdfWidth, pdfHeight]);
+                
+                pages.forEach(function(page, idx) {
+                    if (idx > 0) pdf.addPage();
+                    
+                    var dataURL = page.fabricCanvas.toDataURL({ format: 'png', quality: 1 });
+                    
+                    // Scale to fit the standard page size
+                    var imgWidth = pdfWidth;
+                    var imgHeight = (page.fabricCanvas.height * imgWidth) / page.fabricCanvas.width;
+                    
+                    // If height exceeds page height, scale down
+                    if (imgHeight > pdfHeight) {
+                        imgHeight = pdfHeight;
+                        imgWidth = (page.fabricCanvas.width * imgHeight) / page.fabricCanvas.height;
+                    }
+                    
+                    // Center the image on the page
+                    var x = (pdfWidth - imgWidth) / 2;
+                    var y = (pdfHeight - imgHeight) / 2;
+                    
+                    pdf.addImage(dataURL, 'PNG', x, y, imgWidth, imgHeight);
+                });
+            }
+            
             pdf.save('canvas-export.pdf');
         };
         document.getElementById('uploadPdfInput').onchange = function(e) {
@@ -350,9 +529,27 @@
                     pages = [];
                     canvasPages.innerHTML = '';
                     var loadPages = [];
+                    var originalPageSizes = []; // Store original PDF page sizes
+                    
                     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
                         loadPages.push(pdf.getPage(pageNum).then(function(page) {
                             var viewport = page.getViewport({scale: 1.5});
+                            
+                            // Store original page dimensions (in points, 1 point = 1/72 inch)
+                            var originalWidth = page.view[2] - page.view[0]; // Width in points
+                            var originalHeight = page.view[3] - page.view[1]; // Height in points
+                            
+                            // Convert points to mm (1 point = 0.352777778 mm)
+                            var mmPerPoint = 0.352777778;
+                            var widthMm = originalWidth * mmPerPoint;
+                            var heightMm = originalHeight * mmPerPoint;
+                            
+                            originalPageSizes.push({
+                                width: widthMm,
+                                height: heightMm,
+                                isLandscape: widthMm > heightMm
+                            });
+                            
                             var pageObj = createCanvasContainer(pageNum, viewport.width, viewport.height);
                             pages.push(pageObj);
                             var pdfCanvas = document.createElement('canvas');
@@ -379,6 +576,8 @@
                         }));
                     }
                     Promise.all(loadPages).then(function() {
+                        // Store original page sizes globally for export
+                        window.originalPageSizes = originalPageSizes;
                         showPage(1);
                         updatePageLabels();
                     });
@@ -399,12 +598,11 @@
         getCurrentCanvas().setBackgroundColor('#ffffff', getCurrentCanvas().renderAll.bind(getCurrentCanvas()));
 
         // Text formatting functionality
-        var textToolbar = document.getElementById('textToolbar');
         var currentTextObject = null;
 
         function showTextToolbar(obj) {
             console.log("obj type text: ", obj.type === 'i-text')
-            if (obj && obj.type === 'i-text') {
+            if (obj && obj.type === 'i-text' && textToolbar) {
                 currentTextObject = obj;
                 var canvas = getCurrentCanvas(); // Use the current page's canvas
                 var rect = obj.getBoundingRect();
@@ -433,7 +631,9 @@
         }
 
         function hideTextToolbar() {
+            if (textToolbar) {
             textToolbar.style.display = 'none';
+            }
             currentTextObject = null;
         }
 
@@ -500,11 +700,10 @@
         };
 
         // Shape formatting functionality
-        var shapeTooltip = document.getElementById('shapeTooltip');
         var currentShapeObject = null;
 
         function showShapeTooltip(obj) {
-            if (obj && obj.type !== 'i-text') {
+            if (obj && obj.type !== 'i-text' && shapeTooltip) {
                 currentShapeObject = obj;
                 var canvas = getCurrentCanvas(); // Use the current page's canvas
                 var rect = obj.getBoundingRect();
@@ -546,7 +745,9 @@
         }
 
         function hideShapeTooltip() {
+            if (shapeTooltip) {
             shapeTooltip.style.display = 'none';
+            }
             currentShapeObject = null;
         }
 
@@ -666,13 +867,13 @@
             });
         }
 
-        // Setup events for the single canvas
+        // Setup events for the initial canvas
         setupCanvasEvents(getCurrentCanvas());
 
         // Hide toolbar when clicking outside
         document.addEventListener('click', function(e) {
             // Don't hide if clicking inside the toolbars
-            if (textToolbar.contains(e.target) || shapeTooltip.contains(e.target)) {
+            if ((textToolbar && textToolbar.contains(e.target)) || (shapeTooltip && shapeTooltip.contains(e.target))) {
                 return;
             }
             
